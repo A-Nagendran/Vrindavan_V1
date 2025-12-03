@@ -98,6 +98,7 @@ def analyze_single_call(model, text, filename):
             "Pitch Flow Adherence": parts[16]
         }
     except Exception as e:
+        # Better error logging
         st.error(f"AI Error on {filename}: {e}")
         return None
 
@@ -156,8 +157,16 @@ if st.button("Run Analysis", type="primary"):
         st.warning("⚠️ Please upload at least one PDF.")
     else:
         # Configure AI
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        try:
+            genai.configure(api_key=api_key)
+            # FIX: Explicitly calling the 001 version to ensure stability
+            model = genai.GenerativeModel('gemini-1.5-flash-001') 
+            
+            # Simple connection test
+            test_resp = model.generate_content("test")
+        except Exception as e:
+            st.error(f"❌ API Key Error or Model Issue: {e}")
+            st.stop()
         
         progress_bar = st.progress(0)
         status_text = st.empty()
