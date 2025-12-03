@@ -1,0 +1,211 @@
+import streamlit as st
+import google.generativeai as genai
+import PyPDF2
+import pandas as pd
+import io
+import json
+import time
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, PatternFill, Font
+
+# --- Page Config ---
+st.set_page_config(page_title="Vrindavan Sales Auditor", page_icon="🦚", layout="wide")
+
+# --- CSS for Styling ---
+st.markdown("""
+    <style>
+    .main { padding: 2rem; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- Session State Management ---
+if 'results_df' not in st.session_state:
+    st.session_state.results_df = None
+if 'csm_df' not in st.session_state:
+    st.session_state.csm_df = None
+if 'team_df' not in st.session_state:
+    st.session_state.team_df = None
+
+# --- Helper Functions ---
+
+def extract_text_from_pdf(file):
+    try:
+        reader = PyPDF2.PdfReader(file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF: {e}")
+        return ""
+
+def analyze_single_call(model, text, filename):
+    prompt = """
+        You are a QA Auditor for 'The House of Abhinandan Lodha' (HoABL) specifically for the project 'Navratna at Vrindavan Global'.
+        Analyze this sales call transcript.
+
+        **LANGUAGE RULE:** OUTPUT MUST BE STRICTLY IN ENGLISH. If the transcript contains Hindi or Hinglish, TRANSLATE specific quotes into English.
+
+        **REFERENCE CONTEXT:**
+        1. Project: Navratna at Vrindavan Global (84 Kos Parikrama Marg).
+        2. Growth: "Braj Vision 2041", 32k Cr investment, 11.56 Cr devotees.
+        3. Offers: Base ~1.32 Cr -> Deal ~1.24 Cr. Urgency via 6L Club Waiver + 2L Spot Offer.
+
+        **YOUR TASK: Extract these 17 fields.**
+        1. Lead Intent (Pure Investor / Spiritual Buyer / Second-home / Mixed)
+        2. Brand Trust (Yes/No + Detail)
+        3. Value Proposition (Yes/No + Detail)
+        4. ROI Questions (Yes/No + Detail)
+        5. Spiritual Connect (Yes/No + Detail)
+        6. Technical/Payment (Yes/No + Detail)
+        7. Urgency: 6L+2L Offer (Yes/No + Reason)
+        8. Urgency: Price Movement (Yes/No + Reason)
+        9. Family Objections (Detail)
+        10. Pitch Flow Adherence % (0-100)
+
+        **OUTPUT FORMAT:**
+        Return a SINGLE line separated by '###' delimiters containing exactly these 17 fields:
+        CSM Name###Customer Name###Lead Intent###Brand Trust (Yes/No)###Brand Trust Detail###Value (Yes/No)###Value Detail###ROI (Yes/No)###ROI Detail###Spiritual (Yes/No)###Spiritual Detail###Technical (Yes/No)###Technical Detail###Urgency: Offers###Urgency: Price Move###Family Objections###Pitch Flow %
+
+        **TRANSCRIPT:**
+        """ + text[:25000]
+
+    try:
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
+        parts = [x.strip() for x in raw.split('###')]
+        while len(parts) < 17: parts.append("-")
+        
+        return {
+            "File Name": filename,
+            "CSM Name": parts[0],
+            "Customer Name": parts[1],
+            "Lead Intent": parts[2],
+            "⚠️ Brand Trust": parts[3],
+            "📝 Brand Detail": parts[4],
+            "⚠️ Value": parts[5],
+            "📝 Value Detail": parts[6],
+            "⚠️ ROI": parts[7],
+            "📝 ROI Detail": parts[8],
+            "⚠️ Spiritual": parts[9],
+            "📝 Spiritual Detail": parts[10],
+            "⚠️ Technical": parts[11],
+            "📝 Technical Detail": parts[12],
+            "Urgency: 6L+2L Offer": parts[13],
+            "Urgency: Price Movement": parts[14],
+            "Family Objections": parts[15],
+            "Pitch Flow Adherence": parts[16]
+        }
+    except Exception as e:
+        st.error(f"AI Error on {filename}: {e}")
+        return None
+
+def generate_summaries(model, df):
+    csv_data = df.to_csv(index=False)
+    prompt = f"""
+    You are the Sales Training Head at HoABL. Analyze this batch of sales data for 'Navratna at Vrindavan'.
+    Data: {csv_data}
+
+    Output valid JSON with keys: "CSM_Summaries" (list of objects with CSM Name, Strengths, Areas of Improvement, Specific Instances) and "Team_Summary" (list of strings/insights).
+    """
+    try:
+        response = model.generate_content(prompt)
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_text)
+        return pd.DataFrame(data.get("CSM_Summaries", [])), pd.DataFrame(data.get("Team_Summary", []), columns=["Team Insights"])
+    except:
+        return pd.DataFrame(), pd.DataFrame(["Summary Generation Failed"], columns=["Team Insights"])
+
+def to_excel(df_results, df_csm, df_team):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_results.to_excel(writer, sheet_name='Call Analysis', index=False)
+        if df_csm is not None: df_csm.to_excel(writer, sheet_name='CSM Summary', index=False)
+        if df_team is not None: df_team.to_excel(writer, sheet_name='Team Performance', index=False)
+        
+        # Basic Formatting
+        workbook = writer.book
+        for ws in workbook.worksheets:
+            header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width = 30
+                
+    return output.getvalue()
+
+# --- Main App Layout ---
+
+st.title("🦚 Vrindavan Global Sales Auditor")
+st.markdown("### Navratna v4 | Powered by Gemini 1.5 Flash")
+
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    api_key = st.text_input("Enter Gemini API Key", type="password", help="Get this from Google AI Studio")
+    st.info("Files are processed securely and not stored permanently.")
+
+uploaded_files = st.file_uploader("Upload Call Transcripts (PDF)", type=['pdf'], accept_multiple_files=True)
+
+if st.button("Run Analysis", type="primary"):
+    if not api_key:
+        st.warning("⚠️ Please enter your API Key in the sidebar.")
+    elif not uploaded_files:
+        st.warning("⚠️ Please upload at least one PDF.")
+    else:
+        # Configure AI
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        results = []
+        
+        for i, file in enumerate(uploaded_files):
+            status_text.text(f"Analyzing {file.name}...")
+            text = extract_text_from_pdf(file)
+            if text:
+                data = analyze_single_call(model, text, file.name)
+                if data: results.append(data)
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            time.sleep(1) # Rate limit safety
+            
+        if results:
+            st.success("Analysis Complete! Generating Summaries...")
+            df_results = pd.DataFrame(results)
+            df_csm, df_team = generate_summaries(model, df_results)
+            
+            # Save to Session State
+            st.session_state.results_df = df_results
+            st.session_state.csm_df = df_csm
+            st.session_state.team_df = df_team
+            st.rerun() # Refresh to show results
+            
+        else:
+            st.error("No data could be extracted.")
+
+# --- Display Results ---
+if st.session_state.results_df is not None:
+    st.divider()
+    
+    # Download Button
+    excel_data = to_excel(st.session_state.results_df, st.session_state.csm_df, st.session_state.team_df)
+    st.download_button(
+        label="📥 Download Full Excel Report",
+        data=excel_data,
+        file_name="Vrindavan_Analysis_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary"
+    )
+    
+    tab1, tab2, tab3 = st.tabs(["📋 Call Analysis", "👨‍🏫 CSM Training", "📈 Team Stats"])
+    
+    with tab1:
+        st.dataframe(st.session_state.results_df)
+    with tab2:
+        st.dataframe(st.session_state.csm_df)
+    with tab3:
+        st.dataframe(st.session_state.team_df)
